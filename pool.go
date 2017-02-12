@@ -28,7 +28,12 @@ import (
 	"time"
 )
 
-var errPoolClosed = errors.New("red: pool closed")
+var (
+	// ErrTooManyActive represents the error on a Pool when the
+	// MaxActiveConns and MaxWaiting limits have been reached.
+	ErrTooManyActive = errors.New("red: too many active connections")
+	errPoolClosed    = errors.New("red: pool closed")
+)
 
 type idleConn struct {
 	conn      Conn
@@ -53,6 +58,11 @@ type Pool struct {
 	// MaxIdleDuration represents the timeout for an idle connection. By
 	// default, there is no idle timeout.
 	MaxIdleDuration time.Duration
+	// MaxWaiting represents the maximum number of goroutines waiting for a
+	// Conn because they are blocked by MaxActiveConns. The default value is
+	// no limit. With a value < 0, ErrTooManyActive will be returned whenever
+	// MaxActiveConns is reached.
+	MaxWaiting int
 	// OnReuse is an optional function to intercept an idle Conn before use.
 	// If OnReuse returns false, the Conn will be closed and another will be
 	// retrieved/created.
@@ -69,7 +79,7 @@ type Pool struct {
 
 // Status represents the status of a Pool.
 type Status struct {
-	// Closed is true of the Pool has been closed.
+	// Closed is true if the Pool has been closed.
 	Closed bool
 	// NumActive is the total number of active connections.
 	NumActive int
@@ -171,6 +181,12 @@ func (p *Pool) getConn() (Conn, error) {
 			p.cond = sync.NewCond(&p.mu)
 		}
 
+		// Check wait limits.
+		if !p.waitOK() {
+			p.mu.Unlock()
+			return nil, ErrTooManyActive
+		}
+
 		p.numWaiting++
 		p.cond.Wait()
 		p.numWaiting--
@@ -203,6 +219,16 @@ func (p *Pool) popIdle() Conn {
 	p.idleConns[len(p.idleConns)-1] = nil
 	p.idleConns = p.idleConns[:len(p.idleConns)-1]
 	return c.conn
+}
+
+func (p *Pool) waitOK() bool {
+	if p.MaxWaiting < 0 {
+		return false
+	}
+	if p.MaxWaiting > 0 && p.numWaiting >= p.MaxWaiting {
+		return false
+	}
+	return true
 }
 
 func (p *Pool) putConn(c Conn) {
