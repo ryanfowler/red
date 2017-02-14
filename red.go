@@ -22,6 +22,10 @@
 
 package red
 
+import (
+	"net"
+)
+
 // NullString represents a string that may be null.
 // Similar to: https://golang.org/pkg/database/sql/#NullString
 type NullString struct {
@@ -34,7 +38,8 @@ type Conn interface {
 	Close() error
 	Cmd(string, ...interface{}) error
 	Err() error
-	ReadArray() (*ArrayRes, error)
+	NetConn() net.Conn
+	ReadArray() (*Array, error)
 	ReadBytes() ([]byte, error)
 	ReadBytesArr() ([][]byte, error)
 	ReadDiscard() error

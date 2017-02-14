@@ -31,9 +31,9 @@ import (
 
 var errTooManyReads = errors.New("red: too many reads on an array")
 
-// ArrayRes represents an iterator for a RESP array. The Close method must be
-// called when the ArrayRes is depleted or is no longer needed.
-type ArrayRes struct {
+// Array represents an iterator for a RESP array. The Close method must be
+// called when the Array is depleted or is no longer needed.
+type Array struct {
 	c      *conn
 	err    error
 	length int
@@ -42,120 +42,120 @@ type ArrayRes struct {
 
 // Length returns the length of the array. A length of -1 indicates that the
 // array is null.
-func (ar *ArrayRes) Length() int {
-	return ar.length
+func (a *Array) Length() int {
+	return a.length
 }
 
-// Close cleans up the ArrayRes and sets an error on the underlying Conn if
+// Close cleans up the Array and sets an error on the underlying Conn if
 // needed.
-func (ar *ArrayRes) Close() error {
-	if ar.length == ar.cursor {
+func (a *Array) Close() error {
+	if a.length == a.cursor {
 		return nil
 	}
-	if ar.err != nil {
+	if a.err != nil {
 		return nil
 	}
-	err := fmt.Errorf("array: short read: %d of %d values", ar.cursor, ar.length)
-	ar.err = err
-	ar.c.forceConnError(err)
+	err := fmt.Errorf("array: short read: %d of %d values", a.cursor, a.length)
+	a.err = err
+	a.c.forceConnError(err)
 	return nil
 }
 
 // Cursor returns the number of values that have been read from the array.
-func (ar *ArrayRes) Cursor() int {
-	return ar.cursor
+func (a *Array) Cursor() int {
+	return a.cursor
 }
 
 // More returns true if there are additional values to read from the array.
-func (ar *ArrayRes) More() bool {
-	return ar.err == nil && ar.cursor < ar.length
+func (a *Array) More() bool {
+	return a.err == nil && a.cursor < a.length
 }
 
 // NextType returns the RESP DataType of the next value to be read.
-func (ar *ArrayRes) NextType() (resp.DataType, error) {
-	if err := ar.peekNext(); err != nil {
+func (a *Array) NextType() (resp.DataType, error) {
+	if err := a.peekNext(); err != nil {
 		return 0, err
 	}
-	t, err := ar.c.NextType()
-	ar.inspectErr(err)
+	t, err := a.c.NextType()
+	a.inspectErr(err)
 	return t, err
 }
 
 // String returns the next value in the array as a string.
-func (ar *ArrayRes) String() (string, error) {
-	if err := ar.next(); err != nil {
+func (a *Array) String() (string, error) {
+	if err := a.next(); err != nil {
 		return "", err
 	}
-	s, err := ar.c.ReadString()
-	ar.inspectErr(err)
+	s, err := a.c.ReadString()
+	a.inspectErr(err)
 	return s, err
 }
 
 // NullString returns the next value in the array as a NullString.
-func (ar *ArrayRes) NullString() (NullString, error) {
-	if err := ar.next(); err != nil {
+func (a *Array) NullString() (NullString, error) {
+	if err := a.next(); err != nil {
 		return NullString{}, err
 	}
-	ns, err := ar.c.ReadNullString()
-	ar.inspectErr(err)
+	ns, err := a.c.ReadNullString()
+	a.inspectErr(err)
 	return ns, err
 }
 
 // Bytes returns the next value in the array as a byte slice.
-func (ar *ArrayRes) Bytes() ([]byte, error) {
-	if err := ar.next(); err != nil {
+func (a *Array) Bytes() ([]byte, error) {
+	if err := a.next(); err != nil {
 		return nil, err
 	}
-	b, err := ar.c.ReadBytes()
-	ar.inspectErr(err)
+	b, err := a.c.ReadBytes()
+	a.inspectErr(err)
 	return b, err
 }
 
 // Integer returns the next value in the array as an integer.
-func (ar *ArrayRes) Integer() (int64, error) {
-	if err := ar.next(); err != nil {
+func (a *Array) Integer() (int64, error) {
+	if err := a.next(); err != nil {
 		return 0, err
 	}
-	i, err := ar.c.ReadInteger()
-	ar.inspectErr(err)
+	i, err := a.c.ReadInteger()
+	a.inspectErr(err)
 	return i, err
 }
 
-// Array returns the next value in the array as an ArrayRes.
-func (ar *ArrayRes) Array() (*ArrayRes, error) {
-	if err := ar.next(); err != nil {
+// Array returns the next value in the array as an Array.
+func (a *Array) Array() (*Array, error) {
+	if err := a.next(); err != nil {
 		return nil, err
 	}
-	aRes, err := ar.c.ReadArray()
-	ar.inspectErr(err)
+	aRes, err := a.c.ReadArray()
+	a.inspectErr(err)
 	return aRes, err
 }
 
-func (ar *ArrayRes) peekNext() error {
-	if ar.cursor >= ar.length {
+func (a *Array) peekNext() error {
+	if a.cursor >= a.length {
 		return errTooManyReads
 	}
-	if ar.err != nil {
-		return ar.err
+	if a.err != nil {
+		return a.err
 	}
 	return nil
 }
 
-func (ar *ArrayRes) next() error {
-	err := ar.peekNext()
+func (a *Array) next() error {
+	err := a.peekNext()
 	if err == nil {
-		ar.cursor++
+		a.cursor++
 	}
 	return err
 }
 
-func (ar *ArrayRes) inspectErr(err error) {
+func (a *Array) inspectErr(err error) {
 	if err == nil {
 		return
 	}
 	if !resp.IsFatalError(err) {
 		err = fmt.Errorf("unexpected error in array: %s", err.Error())
 	}
-	ar.c.forceConnError(err)
-	ar.err = err
+	a.c.forceConnError(err)
+	a.err = err
 }

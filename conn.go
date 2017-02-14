@@ -226,13 +226,13 @@ func (c *conn) ReadBytes() ([]byte, error) {
 //
 // - Array: returns an ArrayRes.
 // - Bulk string, Simple string, Integer, Error: an error is returned.
-func (c *conn) ReadArray() (*ArrayRes, error) {
+func (c *conn) ReadArray() (*Array, error) {
 	length, err := c.r.ReadArrayLength()
 	if err != nil {
 		c.connError(err)
 		return nil, err
 	}
-	return &ArrayRes{
+	return &Array{
 		c:      c,
 		length: length,
 	}, nil
