@@ -45,24 +45,35 @@ type idleConn struct {
 type Pool struct {
 	// Addr represents the address of the Redis server to connect to; Required.
 	Addr string
+
 	// Dial is an optional function to create a Conn. The default dial
 	// attempts to create a TCP connection to the Redis server with a 30 -
 	// second connection timeout.
 	Dial func(string) (Conn, error)
+
 	// MaxActiveConns represents the maximum total active connections at a
 	// given time. A value <= 0 is no active limit.
 	MaxActiveConns int
+
 	// MaxIdleConns represents the maximum number of idle connections at a
 	// given time. The default value is 10.
 	MaxIdleConns int
+
 	// MaxIdleDuration represents the timeout for an idle connection. By
 	// default, there is no idle timeout.
 	MaxIdleDuration time.Duration
+
 	// MaxWaiting represents the maximum number of goroutines waiting for a
 	// Conn because they are blocked by MaxActiveConns. The default value is
 	// no limit. With a value < 0, ErrTooManyActive will be returned whenever
 	// MaxActiveConns is reached.
 	MaxWaiting int
+
+	// NetTimeout sets a timeout on a Conn for when all IO operations will
+	// return an error. It calls the SetDeadline method on the underlying
+	// net.Conn before presenting the Conn for use.
+	NetTimeout time.Duration
+
 	// OnReuse is an optional function to intercept an idle Conn before use.
 	// If OnReuse returns false, the Conn will be closed and another will be
 	// retrieved/created.
@@ -148,6 +159,7 @@ func (p *Pool) Conn(fn func(c Conn) error) error {
 		return err
 	}
 	defer p.putConn(c)
+	p.setTimeout(c)
 	return fn(c)
 }
 
@@ -203,6 +215,12 @@ func (p *Pool) getConn() (Conn, error) {
 		return nil, err
 	}
 	return c, nil
+}
+
+func (p *Pool) setTimeout(c Conn) {
+	if p.NetTimeout > 0 {
+		c.NetConn().SetDeadline(time.Now().Add(p.NetTimeout))
+	}
 }
 
 func (p *Pool) dialConn() (Conn, error) {
@@ -272,13 +290,13 @@ func (p *Pool) decrActiveLocked(n int) {
 	}
 }
 
-func (p *Pool) ExecArray(cmd string, args []interface{}, fn func(*ArrayRes) error) error {
+func (p *Pool) ExecArray(cmd string, args []interface{}, fn func(*Array) error) error {
 	return p.Conn(func(c Conn) error {
 		return p.execArray(c, cmd, args, fn)
 	})
 }
 
-func (p *Pool) execArray(c Conn, cmd string, args []interface{}, fn func(*ArrayRes) error) error {
+func (p *Pool) execArray(c Conn, cmd string, args []interface{}, fn func(*Array) error) error {
 	c.Cmd(cmd, args...)
 	err := c.Send()
 	if err != nil {
