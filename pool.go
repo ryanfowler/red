@@ -51,6 +51,10 @@ type Pool struct {
 	// second connection timeout.
 	Dial func(string) (Conn, error)
 
+	// IdleConnTimeout represents the timeout for an idle connection. By
+	// default, there is no idle timeout.
+	IdleConnTimeout time.Duration
+
 	// MaxActiveConns represents the maximum total active connections at a
 	// given time. A value <= 0 is no active limit.
 	MaxActiveConns int
@@ -58,10 +62,6 @@ type Pool struct {
 	// MaxIdleConns represents the maximum number of idle connections at a
 	// given time. The default value is 10.
 	MaxIdleConns int
-
-	// MaxIdleDuration represents the timeout for an idle connection. By
-	// default, there is no idle timeout.
-	MaxIdleDuration time.Duration
 
 	// MaxWaiting represents the maximum number of goroutines waiting for a
 	// Conn because they are blocked by MaxActiveConns. The default value is
@@ -463,14 +463,14 @@ func (p *Pool) execInteger(c Conn, cmd string, args ...interface{}) (int64, erro
 }
 
 func (p *Pool) startMaxIdleWorker() {
-	if p.MaxIdleDuration > 0 && p.chMaxIdleDur == nil && len(p.idleConns) > 0 {
+	if p.IdleConnTimeout > 0 && p.chMaxIdleDur == nil && len(p.idleConns) > 0 {
 		p.chMaxIdleDur = make(chan struct{}, 1)
 		go p.maxIdleWorker()
 	}
 }
 
 func (p *Pool) maxIdleWorker() {
-	dur := maxDuration(p.MaxIdleDuration, time.Second)
+	dur := maxDuration(p.IdleConnTimeout, time.Second)
 	t := time.NewTimer(dur)
 	for {
 		select {
