@@ -34,7 +34,10 @@ import (
 	"github.com/ryanfowler/red/resp"
 )
 
-const defaultDialTimeout = 30 * time.Second
+const (
+	defaultDialTimeout = 30 * time.Second
+	defaultBufferSize  = 1 << 13
+)
 
 // Dial returns a new Conn using the the TCP protocol and the provided address
 // and connection timeout.
@@ -53,6 +56,10 @@ func DialNetwork(network, addr string, timeout time.Duration) (Conn, error) {
 	return NewConn(tcpConn), nil
 }
 
+func DialNetworkSize(network, addr string, timeout time.Duration, bufferSize int) (Conn, error) {
+	return nil, nil
+}
+
 // conn represents the actual implementation of the Conn interface.
 type conn struct {
 	c net.Conn
@@ -67,11 +74,7 @@ type conn struct {
 
 // NewConn returns an initialized Conn using the provided net.Conn.
 func NewConn(c net.Conn) Conn {
-	return &conn{
-		c: c,
-		r: resp.NewReader(c),
-		w: resp.NewWriter(c),
-	}
+	return NewConnSize(c, defaultBufferSize)
 }
 
 // NewConnSize returns an initialized Conn using the provided net.Conn and
@@ -238,11 +241,11 @@ func (c *conn) ReadArray() (*Array, error) {
 	}, nil
 }
 
-// ReadStringArr reads the next value as a slice of strings.
+// ReadStringArray reads the next value as a slice of strings.
 //
 // - Array: returns the array values as strings.
 // - Bulk string, Simple string, Integer, Error: an error is returned.
-func (c *conn) ReadStringArr() ([]string, error) {
+func (c *conn) ReadStringArray() ([]string, error) {
 	ar, err := c.ReadArray()
 	if err != nil {
 		return nil, err
@@ -262,11 +265,11 @@ func (c *conn) ReadStringArr() ([]string, error) {
 	return ss, nil
 }
 
-// ReadNullStringArr reads the next value as a slice of NullStrings.
+// ReadNullStringArray reads the next value as a slice of NullStrings.
 //
 // - Array: returns the array values as NullStrings.
 // - Bulk string, Simple string, Integer, Error: an error is returned.
-func (c *conn) ReadNullStringArr() ([]NullString, error) {
+func (c *conn) ReadNullStringArray() ([]NullString, error) {
 	ar, err := c.ReadArray()
 	if err != nil {
 		return nil, err
@@ -286,11 +289,11 @@ func (c *conn) ReadNullStringArr() ([]NullString, error) {
 	return ss, nil
 }
 
-// ReadBytesArr reads the next value as a slice of byte slices.
+// ReadBytesArray reads the next value as a slice of byte slices.
 //
 // - Array: returns the array values as byte slices.
 // - Bulk string, Simple string, Integer, Error: an error is returned.
-func (c *conn) ReadBytesArr() ([][]byte, error) {
+func (c *conn) ReadBytesArray() ([][]byte, error) {
 	ar, err := c.ReadArray()
 	if err != nil {
 		return nil, err
@@ -310,11 +313,11 @@ func (c *conn) ReadBytesArr() ([][]byte, error) {
 	return bs, nil
 }
 
-// ReadIntegerArr reads the next value as a slice of integers.
+// ReadIntegerArray reads the next value as a slice of integers.
 //
 // - Array: returns the array values as integers.
 // - Bulk string, Simple string, Integer, Error: an error is returned.
-func (c *conn) ReadIntegerArr() ([]int64, error) {
+func (c *conn) ReadIntegerArray() ([]int64, error) {
 	ar, err := c.ReadArray()
 	if err != nil {
 		return nil, err

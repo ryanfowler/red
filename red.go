@@ -41,13 +41,13 @@ type Conn interface {
 	NetConn() net.Conn
 	ReadArray() (*Array, error)
 	ReadBytes() ([]byte, error)
-	ReadBytesArr() ([][]byte, error)
+	ReadBytesArray() ([][]byte, error)
 	ReadDiscard() error
 	ReadInteger() (int64, error)
-	ReadIntegerArr() ([]int64, error)
+	ReadIntegerArray() ([]int64, error)
 	ReadNullString() (NullString, error)
-	ReadNullStringArr() ([]NullString, error)
+	ReadNullStringArray() ([]NullString, error)
 	ReadString() (string, error)
-	ReadStringArr() ([]string, error)
+	ReadStringArray() ([]string, error)
 	Send() error
 }

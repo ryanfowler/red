@@ -310,23 +310,80 @@ func (p *Pool) execArray(c Conn, cmd string, args []interface{}, fn func(*Array)
 	return fn(ar)
 }
 
-func (p *Pool) ExecStringArr(cmd string, args ...interface{}) ([]string, error) {
+func (p *Pool) ExecStringArray(cmd string, args ...interface{}) ([]string, error) {
 	var ss []string
 	err := p.Conn(func(c Conn) error {
 		var err error
-		ss, err = p.execStringArr(c, cmd, args...)
+		ss, err = p.execStringArray(c, cmd, args...)
 		return err
 	})
 	return ss, err
 }
 
-func (p *Pool) execStringArr(c Conn, cmd string, args ...interface{}) ([]string, error) {
+func (p *Pool) execStringArray(c Conn, cmd string, args ...interface{}) ([]string, error) {
 	c.Cmd(cmd, args...)
 	err := c.Send()
 	if err != nil {
 		return nil, err
 	}
-	return c.ReadStringArr()
+	return c.ReadStringArray()
+}
+
+func (p *Pool) ExecNullStringArray(cmd string, args ...interface{}) ([]NullString, error) {
+	var nss []NullString
+	err := p.Conn(func(c Conn) error {
+		var err error
+		nss, err = p.execNullStringArray(c, cmd, args...)
+		return err
+	})
+	return nss, err
+}
+
+func (p *Pool) execNullStringArray(c Conn, cmd string, args ...interface{}) ([]NullString, error) {
+	c.Cmd(cmd, args...)
+	err := c.Send()
+	if err != nil {
+		return nil, err
+	}
+	return c.ReadNullStringArray()
+}
+
+func (p *Pool) ExecBytesArray(cmd string, args ...interface{}) ([][]byte, error) {
+	var bs [][]byte
+	err := p.Conn(func(c Conn) error {
+		var err error
+		bs, err = p.execBytesArray(c, cmd, args...)
+		return err
+	})
+	return bs, err
+}
+
+func (p *Pool) execBytesArray(c Conn, cmd string, args ...interface{}) ([][]byte, error) {
+	c.Cmd(cmd, args...)
+	err := c.Send()
+	if err != nil {
+		return nil, err
+	}
+	return c.ReadBytesArray()
+}
+
+func (p *Pool) ExecIntegerArray(cmd string, args ...interface{}) ([]int64, error) {
+	var is []int64
+	err := p.Conn(func(c Conn) error {
+		var err error
+		is, err = p.execIntegerArray(c, cmd, args...)
+		return err
+	})
+	return is, err
+}
+
+func (p *Pool) execIntegerArray(c Conn, cmd string, args ...interface{}) ([]int64, error) {
+	c.Cmd(cmd, args...)
+	err := c.Send()
+	if err != nil {
+		return nil, err
+	}
+	return c.ReadIntegerArray()
 }
 
 func (p *Pool) ExecString(cmd string, args ...interface{}) (string, error) {
