@@ -70,7 +70,7 @@ func TestDiscard(t *testing.T) {
 	if err == nil {
 		t.Fatal("Unexpected nil error")
 	}
-	if err.Error() != "resp: bulk string length: unable to parse integer 'hi'" {
+	if err.Error() != "resp: read: bulk string length: unable to parse integer 'hi'" {
 		t.Fatalf("Unexpected error message: %s", err.Error())
 	}
 
@@ -81,7 +81,7 @@ func TestDiscard(t *testing.T) {
 	if err == nil {
 		t.Fatal("Unexpected nil error")
 	}
-	if err.Error() != "resp: received error: ERR test error" {
+	if err.Error() != "ERR test error" {
 		t.Fatalf("Unexpected error message: %s", err.Error())
 	}
 	if s.Len() != 0 {
@@ -95,7 +95,7 @@ func TestDiscard(t *testing.T) {
 	if err == nil {
 		t.Fatal("Unexpected nil error")
 	}
-	if err.Error() != "resp: unexpected error at array index 1: ERR test error" {
+	if err.Error() != "resp: read: unexpected error at array index 1: ERR test error" {
 		t.Fatalf("Unexpected error discarding array: %s", err.Error())
 	}
 
@@ -106,7 +106,7 @@ func TestDiscard(t *testing.T) {
 	if err == nil {
 		t.Fatal("Unexpected nil error")
 	}
-	if err.Error() != "resp: array length: unable to parse integer 'hi'" {
+	if err.Error() != "resp: read: array length: unable to parse integer 'hi'" {
 		t.Fatalf("Unexpected error discarding array: %s", err.Error())
 	}
 
@@ -128,7 +128,7 @@ func TestDiscard(t *testing.T) {
 	if err == nil {
 		t.Fatal("Unexpected nil error")
 	}
-	if err.Error() != "resp: invalid type byte 'b'" {
+	if err.Error() != "resp: read: invalid type byte 'b'" {
 		t.Fatalf("Unexpected error message: %s", err.Error())
 	}
 
@@ -139,7 +139,7 @@ func TestDiscard(t *testing.T) {
 	if err == nil {
 		t.Fatal("Unexpected nil error")
 	}
-	if err.Error() != "resp: unexpected empty read" {
+	if err.Error() != "resp: read: unexpected empty read" {
 		t.Fatalf("Unexpected error message: %s", err.Error())
 	}
 }
@@ -264,27 +264,21 @@ func TestReadError(t *testing.T) {
 		t.Fatalf("Unexpected type byte: %s", resp.DataTypeString(tp))
 	}
 
-	err = r.ReadError()
-	if err == nil {
-		t.Fatal("Unexpected nil error")
+	msg, err := r.ReadError()
+	if err != nil {
+		t.Fatalf("Unexpected error: %s", err.Error())
 	}
-	if resp.IsFatalError(err) {
-		t.Fatalf("Unexpected fatal error: %s", err.Error())
-	}
-	if err.Error() != "resp: received error: ERR test error" {
-		t.Fatalf("Unexpected error message: %s", err.Error())
+	if msg != "ERR test error" {
+		t.Fatalf("Unexpected error message: %s", msg)
 	}
 
 	s = strings.NewReader("+Hi\r\n")
 	r = resp.NewReader(s)
-	err = r.ReadError()
+	msg, err = r.ReadError()
 	if err == nil {
-		t.Fatal("Unexpected nil error")
+		t.Fatalf("Unexpected nil error")
 	}
-	if !resp.IsFatalError(err) {
-		t.Fatalf("Unexpected non-fatal error: %s", err.Error())
-	}
-	if err.Error() != "resp: expecting type 'error'; received 'simple string'" {
-		t.Fatalf("Unexpected error message: %s", err.Error())
+	if err.Error() != "resp: read: expecting type 'error'; received 'simple string'" {
+		t.Fatalf("Unexpected error message: %s", msg)
 	}
 }
