@@ -24,7 +24,6 @@ package resp
 
 import (
 	"bufio"
-	"fmt"
 	"io"
 	"strconv"
 )
@@ -45,6 +44,13 @@ func NewWriter(w io.Writer) *Writer {
 // buffer size.
 func NewWriterSize(w io.Writer, bufferSize int) *Writer {
 	return &Writer{w: bufio.NewWriterSize(w, bufferSize)}
+}
+
+// NewWriterBuf returns a new RESP Writer using the provided io.Writer and
+// existing bufio.Writer.
+func NewWriterBuf(w io.Writer, bw *bufio.Writer) *Writer {
+	bw.Reset(w)
+	return &Writer{w: bw}
 }
 
 // Flush writes any buffered data to the Writer's underlying io.Writer.
@@ -156,8 +162,4 @@ func (w *Writer) writeLength(lead DataType, n int64) error {
 	buf = append(buf, crlf...)
 	_, err := w.w.Write(buf)
 	return err
-}
-
-func writeError(msg string) error {
-	return formatError(fmt.Sprintf("write: %s", msg))
 }

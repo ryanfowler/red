@@ -153,7 +153,7 @@ func (a *Array) inspectErr(err error) {
 	if err == nil {
 		return
 	}
-	if !resp.IsFatalError(err) {
+	if _, ok := err.(*resp.Error); !ok {
 		err = fmt.Errorf("unexpected error in array: %s", err.Error())
 	}
 	a.c.forceConnError(err)

@@ -47,11 +47,18 @@ func NewReaderSize(r io.Reader, bufferSize int) *Reader {
 	return &Reader{r: bufio.NewReaderSize(r, bufferSize)}
 }
 
+// NewReaderBuf returns a new RESP Reader using the provided io.Reader and
+// existing bufio,Reader.
+func NewReaderBuf(r io.Reader, br *bufio.Reader) *Reader {
+	br.Reset(r)
+	return &Reader{r: br}
+}
+
 // NextType returns the DataType of the next value to be read.
 func (r *Reader) NextType() (DataType, error) {
 	b, err := r.r.Peek(1)
 	if err != nil {
-		return 0, formatError(fmt.Sprintf("reading next type: %s", err.Error()))
+		return 0, readError(fmt.Sprintf("next type: %s", err.Error()))
 	}
 	switch DataType(b[0]) {
 	case ArrayType:
@@ -65,7 +72,7 @@ func (r *Reader) NextType() (DataType, error) {
 	case SimpleStringType:
 		return SimpleStringType, nil
 	default:
-		return 0, formatError(fmt.Sprintf("invalid type byte: '%s'", b))
+		return 0, readError(fmt.Sprintf("invalid type byte: '%s'", b))
 	}
 }
 
@@ -77,14 +84,16 @@ func (r *Reader) ReadArrayLength() (int, error) {
 	}
 	i, err := parseInt(b)
 	if err != nil {
-		return 0, formatError(err.Error())
+		return 0, readError(err.Error())
 	}
 	return int(i), nil
 }
 
 var (
-	okBytes  = []byte{'O', 'K'}
-	okString = "OK"
+	okBytes    = []byte{'O', 'K'}
+	okString   = "OK"
+	pongBytes  = []byte{'P', 'O', 'N', 'G'}
+	pongString = "PONG"
 )
 
 // ReadSimpleString parses a simple string and returns the value.
@@ -92,6 +101,9 @@ func (r *Reader) ReadSimpleString() (string, error) {
 	b, err := r.readAndAssert(SimpleStringType)
 	if bytes.Equal(b, okBytes) {
 		return okString, err
+	}
+	if bytes.Equal(b, pongBytes) {
+		return pongString, err
 	}
 	return string(b), err
 }
@@ -118,7 +130,7 @@ func (r *Reader) ReadBulkString() (string, bool, error) {
 		return "", false, r.readBulkStringErr(err.Error())
 	}
 	if !strings.HasSuffix(s, "\r\n") {
-		return "", false, formatError("reading bulk string: invalid CRLF")
+		return "", false, readError("reading bulk string: invalid CRLF")
 	}
 	return s[:len(s)-2], true, nil
 }
@@ -131,12 +143,12 @@ func (r *Reader) readString(length int) (string, error) {
 		return s, err
 	}
 	if err != bufio.ErrBufferFull {
-		return "", err
+		return "", readError(err.Error())
 	}
 	b = make([]byte, length)
 	_, err = io.ReadFull(r.r, b)
 	if err != nil {
-		return "", err
+		return "", readError(err.Error())
 	}
 	return string(b), nil
 }
@@ -157,13 +169,13 @@ func (r *Reader) ReadBulkStringBytes() ([]byte, error) {
 		return nil, r.readBulkStringErr(err.Error())
 	}
 	if !bytes.HasSuffix(s, crlf) {
-		return nil, formatError("reading bulk string: invalid CRLF")
+		return nil, readError("bulk string: invalid CRLF")
 	}
 	return s[:len(s)-2], nil
 }
 
 func (r *Reader) readBulkStringErr(msg string) error {
-	return formatError(fmt.Sprintf("reading bulk string: %s", msg))
+	return readError(fmt.Sprintf("bulk string: %s", msg))
 }
 
 func (r *Reader) readBulkStringLength() (int64, error) {
@@ -173,7 +185,7 @@ func (r *Reader) readBulkStringLength() (int64, error) {
 	}
 	length, err := parseInt(b)
 	if err != nil {
-		return 0, formatError(fmt.Sprintf("parsing bulk string length: %s", err.Error()))
+		return 0, readError(fmt.Sprintf("parsing bulk string length: %s", err.Error()))
 	}
 	return length, nil
 }
@@ -186,7 +198,7 @@ func (r *Reader) ReadInteger() (int64, error) {
 	}
 	i, err := parseInt(b)
 	if err != nil {
-		return 0, formatError(err.Error())
+		return 0, readError(err.Error())
 	}
 	return i, nil
 }
@@ -198,12 +210,12 @@ func (r *Reader) ReadIntegerBytes() ([]byte, error) {
 }
 
 // ReadError parses an error value and returns the result as an error.
-func (r *Reader) ReadError() error {
+func (r *Reader) ReadError() (string, error) {
 	b, err := r.readAndAssert(ErrorType)
 	if err != nil {
-		return err
+		return "", err
 	}
-	return &receivedError{msg: string(b)}
+	return string(b), nil
 }
 
 // Discard reads the next value and discards the result, returning any error
@@ -214,14 +226,14 @@ func (r *Reader) Discard() error {
 		return err
 	}
 	if len(b) == 0 {
-		return formatError("unexpected empty read")
+		return readError("unexpected empty read")
 	}
 	t := DataType(b[0])
 	b = b[1:]
 
 	switch t {
 	case ErrorType:
-		return &receivedError{msg: string(b)}
+		return fmt.Errorf("%s", b)
 	case IntegerType, SimpleStringType:
 		return nil
 	case ArrayType:
@@ -229,14 +241,14 @@ func (r *Reader) Discard() error {
 	case BulkStringType:
 		return r.discardBulkString(b)
 	default:
-		return formatError(fmt.Sprintf("invalid type byte '%s'", string(t)))
+		return readError(fmt.Sprintf("invalid type byte '%s'", string(t)))
 	}
 }
 
 func (r *Reader) discardArray(b []byte) error {
 	length, err := parseInt(b)
 	if err != nil {
-		return formatError(fmt.Sprintf("array length: %s", err.Error()))
+		return readError(fmt.Sprintf("array length: %s", err.Error()))
 	}
 	var i int64
 	for i = 0; i < length; i++ {
@@ -244,10 +256,10 @@ func (r *Reader) discardArray(b []byte) error {
 		if err == nil {
 			continue
 		}
-		if re, ok := err.(*receivedError); ok {
-			return formatError(fmt.Sprintf("unexpected error at array index %d: %s", i, re.msg))
+		if _, ok := err.(*Error); ok {
+			return err
 		}
-		return err
+		return readError(fmt.Sprintf("unexpected error at array index %d: %s", i, err.Error()))
 	}
 	return nil
 }
@@ -255,7 +267,7 @@ func (r *Reader) discardArray(b []byte) error {
 func (r *Reader) discardBulkString(b []byte) error {
 	i, err := parseInt(b)
 	if err != nil {
-		return formatError(fmt.Sprintf("bulk string length: %s", err.Error()))
+		return readError(fmt.Sprintf("bulk string length: %s", err.Error()))
 	}
 	if i < 0 {
 		return nil
@@ -263,13 +275,13 @@ func (r *Reader) discardBulkString(b []byte) error {
 	if i > 0 {
 		_, err = r.r.Discard(int(i))
 		if err != nil {
-			return formatError(fmt.Sprintf("read: %s", err.Error()))
+			return readError(fmt.Sprintf("read: %s", err.Error()))
 		}
 	}
 	for _, p := range crlf {
 		err = r.readAndAssertByte(p)
 		if err != nil {
-			return formatError(err.Error())
+			return readError(err.Error())
 		}
 	}
 	return nil
@@ -299,27 +311,27 @@ func (r *Reader) readAndAssert(t DataType) ([]byte, error) {
 func (r *Reader) readLine() ([]byte, error) {
 	b, err := r.r.ReadSlice('\n')
 	if err != nil {
-		return nil, formatError(fmt.Sprintf("read line: %s", err.Error()))
+		return nil, readError(fmt.Sprintf("read line: %s", err.Error()))
 	}
 	if !checkCarriage(b) {
-		return nil, formatError("invalid CRLF")
+		return nil, readError("invalid CRLF")
 	}
 	return b[:len(b)-2], nil
 }
 
 func assertType(b []byte, t DataType) error {
 	if len(b) < 1 {
-		return formatError("unexpected empty line")
+		return readError("unexpected empty line")
 	}
 	if byte(t) == b[0] {
 		return nil
 	}
 	if b[0] == byte(ErrorType) {
-		return &receivedError{msg: string(b[1:])}
+		return fmt.Errorf("%s", b[1:])
 	}
 	expected := DataTypeString(t)
 	received := DataTypeString(DataType(b[0]))
-	return formatError(fmt.Sprintf("expecting type '%s'; received '%s'", expected, received))
+	return readError(fmt.Sprintf("expecting type '%s'; received '%s'", expected, received))
 }
 
 func (r *Reader) readAndAssertByte(b byte) error {

@@ -22,9 +22,7 @@
 
 package resp
 
-import (
-	"fmt"
-)
+import "fmt"
 
 // DataType represents a RESP data type, using the value of its leading byte.
 // See: https://redis.io/topics/protocol
@@ -45,6 +43,11 @@ const (
 
 var crlf = []byte{'\r', '\n'}
 
+const (
+	readStr  = "read"
+	writeStr = "write"
+)
+
 // DataTypeString returns the string representation of the provided DataType.
 func DataTypeString(t DataType) string {
 	switch t {
@@ -63,23 +66,28 @@ func DataTypeString(t DataType) string {
 	}
 }
 
-// IsFatalError returns true if the provided error is fatal (a non-recoverable
-// protocol error).
-func IsFatalError(err error) bool {
-	if _, ok := err.(*receivedError); ok {
-		return false
+// Error represents a fatal and non-recoverable error for either a Reader or
+// Writer.
+type Error struct {
+	Message string
+	Type    string
+}
+
+// Error implements the error interface.
+func (e *Error) Error() string {
+	return fmt.Sprintf("resp: %s: %s", e.Type, e.Message)
+}
+
+func readError(msg string) error {
+	return &Error{
+		Message: msg,
+		Type:    readStr,
 	}
-	return true
 }
 
-type receivedError struct {
-	msg string
-}
-
-func (e *receivedError) Error() string {
-	return fmt.Sprintf("resp: received error: %s", e.msg)
-}
-
-func formatError(msg string) error {
-	return fmt.Errorf("resp: %s", msg)
+func writeError(msg string) error {
+	return &Error{
+		Message: msg,
+		Type:    writeStr,
+	}
 }

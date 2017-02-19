@@ -352,7 +352,11 @@ func (c *conn) readString() (string, bool, error) {
 		b, err := c.r.ReadIntegerBytes()
 		return string(b), err == nil, err
 	case resp.ErrorType:
-		return "", false, c.r.ReadError()
+		msg, err := c.r.ReadError()
+		if err != nil {
+			return "", false, err
+		}
+		return "", false, fmt.Errorf("red: %s", msg)
 	case resp.ArrayType:
 		return "", false, parsingError("string", "array")
 	default:
@@ -374,7 +378,11 @@ func (c *conn) readInteger() (int64, error) {
 	case resp.BulkStringType:
 		s, _, err = c.r.ReadBulkString()
 	case resp.ErrorType:
-		return 0, c.r.ReadError()
+		msg, err := c.r.ReadError()
+		if err != nil {
+			return 0, err
+		}
+		return 0, fmt.Errorf("red: %s", msg)
 	case resp.ArrayType:
 		return 0, parsingError("integer", "array")
 	default:
@@ -404,7 +412,11 @@ func (c *conn) readBytes() ([]byte, error) {
 	case resp.IntegerType:
 		return c.r.ReadIntegerBytes()
 	case resp.ErrorType:
-		return nil, c.r.ReadError()
+		msg, err := c.r.ReadError()
+		if err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("red: %s", msg)
 	case resp.ArrayType:
 		return nil, parsingError("bytes", "array")
 	default:
@@ -421,7 +433,7 @@ func invalidTypeError(t resp.DataType) error {
 }
 
 func (c *conn) connError(err error) {
-	if !resp.IsFatalError(err) {
+	if _, ok := err.(*resp.Error); !ok {
 		return
 	}
 	c.forceConnError(err)
@@ -470,6 +482,8 @@ func (c *conn) writeArg(arg interface{}) error {
 			return c.w.WriteBulkString("1")
 		}
 		return c.w.WriteBulkString("0")
+	case nil:
+		return c.w.WriteBulkString("")
 	default:
 		var buf bytes.Buffer
 		fmt.Fprint(&buf, v)
