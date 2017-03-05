@@ -34,7 +34,7 @@ var errTooManyReads = errors.New("red: too many reads on an array")
 // Array represents an iterator for a RESP array. The Close method must be
 // called when the Array is depleted or is no longer needed.
 type Array struct {
-	c      *conn
+	c      *Conn
 	err    error
 	length int
 	cursor int
@@ -76,7 +76,7 @@ func (a *Array) NextType() (resp.DataType, error) {
 	if err := a.peekNext(); err != nil {
 		return 0, err
 	}
-	t, err := a.c.NextType()
+	t, err := a.c.nextType()
 	a.inspectErr(err)
 	return t, err
 }
@@ -86,7 +86,7 @@ func (a *Array) String() (string, error) {
 	if err := a.next(); err != nil {
 		return "", err
 	}
-	s, err := a.c.ReadString()
+	s, _, err := a.c.readString()
 	a.inspectErr(err)
 	return s, err
 }
@@ -96,9 +96,12 @@ func (a *Array) NullString() (NullString, error) {
 	if err := a.next(); err != nil {
 		return NullString{}, err
 	}
-	ns, err := a.c.ReadNullString()
+	s, ok, err := a.c.readString()
 	a.inspectErr(err)
-	return ns, err
+	return NullString{
+		String: s,
+		Valid:  ok,
+	}, err
 }
 
 // Bytes returns the next value in the array as a byte slice.
@@ -106,7 +109,7 @@ func (a *Array) Bytes() ([]byte, error) {
 	if err := a.next(); err != nil {
 		return nil, err
 	}
-	b, err := a.c.ReadBytes()
+	b, err := a.c.readBytes()
 	a.inspectErr(err)
 	return b, err
 }
@@ -116,9 +119,20 @@ func (a *Array) Integer() (int64, error) {
 	if err := a.next(); err != nil {
 		return 0, err
 	}
-	i, err := a.c.ReadInteger()
+	i, err := a.c.readInteger()
 	a.inspectErr(err)
 	return i, err
+}
+
+// Discard discards the next value in the array, returning any error encountered.
+func (a *Array) Discard() error {
+	err := a.next()
+	if err != nil {
+		return err
+	}
+	err = a.c.readDiscard()
+	a.inspectErr(err)
+	return err
 }
 
 // Array returns the next value in the array as an Array.
@@ -126,7 +140,7 @@ func (a *Array) Array() (*Array, error) {
 	if err := a.next(); err != nil {
 		return nil, err
 	}
-	aRes, err := a.c.ReadArray()
+	aRes, err := a.c.readArray()
 	a.inspectErr(err)
 	return aRes, err
 }
