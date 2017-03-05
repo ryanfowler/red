@@ -138,9 +138,8 @@ func (r *Reader) ReadBulkString() (string, bool, error) {
 func (r *Reader) readString(length int) (string, error) {
 	b, err := r.r.Peek(length)
 	if err == nil {
-		s := string(b)
 		_, err = r.r.Discard(length)
-		return s, err
+		return string(b), err
 	}
 	if err != bufio.ErrBufferFull {
 		return "", readError(err.Error())

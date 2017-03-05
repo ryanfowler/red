@@ -22,10 +22,6 @@
 
 package red
 
-import (
-	"net"
-)
-
 // NullString represents a string that may be null.
 // Similar to: https://golang.org/pkg/database/sql/#NullString
 type NullString struct {
@@ -33,21 +29,10 @@ type NullString struct {
 	Valid  bool
 }
 
-// Conn is the interface for a connection to a Redis server.
-type Conn interface {
-	Close() error
-	Cmd(string, ...interface{}) error
-	Err() error
-	NetConn() net.Conn
-	ReadArray() (*Array, error)
-	ReadBytes() ([]byte, error)
-	ReadBytesArray() ([][]byte, error)
-	ReadDiscard() error
-	ReadInteger() (int64, error)
-	ReadIntegerArray() ([]int64, error)
-	ReadNullString() (NullString, error)
-	ReadNullStringArray() ([]NullString, error)
-	ReadString() (string, error)
-	ReadStringArray() ([]string, error)
-	Send() error
+type RedisError struct {
+	msg string
+}
+
+func (e *RedisError) Error() string {
+	return "red: " + e.msg
 }

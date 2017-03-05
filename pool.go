@@ -24,6 +24,8 @@ package red
 
 import (
 	"errors"
+	"fmt"
+	"net"
 	"sync"
 	"time"
 )
@@ -35,32 +37,31 @@ var (
 	errPoolClosed    = errors.New("red: pool closed")
 )
 
-type idleConn struct {
-	conn      Conn
-	idleSince time.Time
-}
-
-// Pool represents a pool of zero or more Redis Conns. All methods on a Pool are
-// save to use concurrently.
-type Pool struct {
-	// Addr represents the address of the Redis server to connect to; Required.
+// Client represents a pool of zero or more Redis Connections.
+//
+// All methods on a Client are safe to use concurrently. All fields on a Client
+// are optional.
+type Client struct {
+	// Addr represents the address of the Redis server to connect to in the
+	// form: <address>:<port>. If no address is provided, "localhost:6379"
+	// will be used.
 	Addr string
 
-	// Dial is an optional function to create a Conn. The default dial
-	// attempts to create a TCP connection to the Redis server with a 30 -
-	// second connection timeout.
-	Dial func(string) (Conn, error)
-
-	// IdleConnTimeout represents the timeout for an idle connection. By
-	// default, there is no idle timeout.
+	// IdleConnTimeout represents the approximate amount of time before an
+	// idle connection will be terminated. By default, there is no idle
+	// timeout.
 	IdleConnTimeout time.Duration
 
-	// MaxActiveConns represents the maximum total active connections at a
-	// given time. A value <= 0 is no active limit.
+	// IOBufferSize represents the byte size for both the read & write
+	// buffers. The default size is DefaultBufferSize.
+	IOBufferSize int
+
+	// MaxActiveConns represents the maximum total number of active (open)
+	// connections at a given time. A value <= 0 means no active limit.
 	MaxActiveConns int
 
-	// MaxIdleConns represents the maximum number of idle connections at a
-	// given time. The default value is 10.
+	// MaxIdleConns represents the maximum total number of idle connections
+	// at a given time. The default value is 10 idle connections.
 	MaxIdleConns int
 
 	// MaxWaiting represents the maximum number of goroutines waiting for a
@@ -69,15 +70,24 @@ type Pool struct {
 	// MaxActiveConns is reached.
 	MaxWaiting int
 
+	// NetDial represents an optional function that will be used to create
+	// a net.Conn.
+	NetDial func(string) (net.Conn, error)
+
 	// NetTimeout sets a timeout on a Conn for when all IO operations will
 	// return an error. It calls the SetDeadline method on the underlying
 	// net.Conn before presenting the Conn for use.
 	NetTimeout time.Duration
 
+	// OnNew represents an optional function that will be called before
+	// presenting the Conn for use. If a non-nil error is returned, the
+	// error will be passed to the calling function.
+	OnNew func(*Conn) error
+
 	// OnReuse is an optional function to intercept an idle Conn before use.
 	// If OnReuse returns false, the Conn will be closed and another will be
 	// retrieved/created.
-	OnReuse func(Conn) bool
+	OnReuse func(*Conn) bool
 
 	mu           sync.Mutex
 	cond         *sync.Cond
@@ -85,7 +95,12 @@ type Pool struct {
 	numActive    int
 	closed       bool
 	chMaxIdleDur chan struct{}
-	idleConns    []*idleConn
+	idleConns    []idleConn
+}
+
+type idleConn struct {
+	conn      *Conn
+	idleSince time.Time
 }
 
 // Status represents the status of a Pool.
@@ -102,46 +117,46 @@ type Status struct {
 }
 
 // Status returns the current status of the Pool.
-func (p *Pool) Status() Status {
-	p.mu.Lock()
+func (cl *Client) Status() Status {
+	cl.mu.Lock()
 	s := Status{
-		Closed:     p.closed,
-		NumActive:  p.numActive,
-		NumIdle:    len(p.idleConns),
-		NumWaiting: p.numWaiting,
+		Closed:     cl.closed,
+		NumActive:  cl.numActive,
+		NumIdle:    len(cl.idleConns),
+		NumWaiting: cl.numWaiting,
 	}
-	p.mu.Unlock()
+	cl.mu.Unlock()
 	return s
 }
 
 // Close closes the Pool and any of its idle connections. After being closed, a
 // pool cannot be used and any attempt to use it will return an error.
-func (p *Pool) Close() error {
-	p.mu.Lock()
-	if p.closed {
-		p.mu.Unlock()
+func (cl *Client) Close() error {
+	cl.mu.Lock()
+	if cl.closed {
+		cl.mu.Unlock()
 		return nil
 	}
-	p.closed = true
+	cl.closed = true
 
-	toClose := make([]Conn, len(p.idleConns))
-	for i, c := range p.idleConns {
+	toClose := make([]*Conn, len(cl.idleConns))
+	for i, c := range cl.idleConns {
 		toClose[i] = c.conn
-		p.idleConns[i] = nil
+		cl.idleConns[i] = idleConn{}
 	}
-	p.idleConns = nil
+	cl.idleConns = nil
 
-	if p.chMaxIdleDur != nil {
+	if cl.chMaxIdleDur != nil {
 		select {
-		case p.chMaxIdleDur <- struct{}{}:
+		case cl.chMaxIdleDur <- struct{}{}:
 		default:
 		}
 	}
-	p.numActive -= len(toClose)
-	if p.cond != nil && p.numWaiting > 0 {
-		p.cond.Broadcast()
+	cl.numActive -= len(toClose)
+	if cl.cond != nil && cl.numWaiting > 0 {
+		cl.cond.Broadcast()
 	}
-	p.mu.Unlock()
+	cl.mu.Unlock()
 
 	for _, c := range toClose {
 		c.Close()
@@ -153,360 +168,286 @@ func (p *Pool) Close() error {
 // Conn allows for direct access to a Conn using the provided function. The
 // Conn is only valid during the lifetime of the function. Conn will return any
 // error returned by fn.
-func (p *Pool) Conn(fn func(c Conn) error) error {
-	c, err := p.getConn()
+func (cl *Client) Conn(fn func(c *Conn) error) error {
+	c, err := cl.getConn()
 	if err != nil {
 		return err
 	}
-	defer p.putConn(c)
-	p.setTimeout(c)
+	defer cl.putConn(c)
+	cl.setTimeout(c)
 	return fn(c)
 }
 
-func (p *Pool) getConn() (Conn, error) {
-	p.mu.Lock()
+func (cl *Client) getConn() (*Conn, error) {
+	cl.mu.Lock()
 	for {
 		// Return if pool is closed.
-		if p.closed {
-			p.mu.Unlock()
+		if cl.closed {
+			cl.mu.Unlock()
 			return nil, errPoolClosed
 		}
 
 		// Attempt to get an idle conn.
-		if len(p.idleConns) > 0 {
-			c := p.popIdle()
-			p.mu.Unlock()
-			if p.OnReuse != nil && !p.OnReuse(c) {
+		if len(cl.idleConns) > 0 {
+			c := cl.popIdle()
+			cl.mu.Unlock()
+			if cl.OnReuse != nil && !cl.OnReuse(c) {
 				c.Close()
-				p.mu.Lock()
-				p.decrActiveLocked(1)
+				cl.mu.Lock()
+				cl.decrActiveLocked(1)
 				continue
 			}
 			return c, nil
 		}
 
 		// Check number of active conns.
-		if p.MaxActiveConns <= 0 || p.numActive < p.MaxActiveConns {
+		if cl.MaxActiveConns <= 0 || cl.numActive < cl.MaxActiveConns {
 			break
 		}
-		if p.cond == nil {
-			p.cond = sync.NewCond(&p.mu)
+		if cl.cond == nil {
+			cl.cond = sync.NewCond(&cl.mu)
 		}
 
 		// Check wait limits.
-		if !p.waitOK() {
-			p.mu.Unlock()
+		if !cl.waitOK() {
+			cl.mu.Unlock()
 			return nil, ErrTooManyActive
 		}
 
-		p.numWaiting++
-		p.cond.Wait()
-		p.numWaiting--
+		cl.numWaiting++
+		cl.cond.Wait()
+		cl.numWaiting--
 	}
-	p.numActive++
-	p.mu.Unlock()
+	cl.numActive++
+	cl.mu.Unlock()
 
 	// Create and return a new connection.
-	c, err := p.dialConn()
+	c, err := cl.dialConn()
 	if err != nil {
-		p.mu.Lock()
-		p.decrActiveLocked(1)
-		p.mu.Unlock()
+		cl.mu.Lock()
+		cl.decrActiveLocked(1)
+		cl.mu.Unlock()
 		return nil, err
 	}
 	return c, nil
 }
 
-func (p *Pool) setTimeout(c Conn) {
-	if p.NetTimeout > 0 {
-		c.NetConn().SetDeadline(time.Now().Add(p.NetTimeout))
+func (cl *Client) setTimeout(c *Conn) {
+	if cl.NetTimeout > 0 {
+		c.NetConn().SetDeadline(time.Now().Add(cl.NetTimeout))
 	}
 }
 
-func (p *Pool) dialConn() (Conn, error) {
-	if p.Dial == nil {
-		return Dial(p.Addr, defaultDialTimeout)
+func (cl *Client) dialConn() (*Conn, error) {
+	var c net.Conn
+	var err error
+	if cl.NetDial != nil {
+		c, err = cl.NetDial(cl.Addr)
+	} else {
+		addr := cl.Addr
+		if addr == "" {
+			addr = "localhost:6379"
+		}
+		c, err = net.DialTimeout("tcp", addr, 30*time.Second)
 	}
-	return p.Dial(p.Addr)
+	if err != nil {
+		return nil, fmt.Errorf("red: dial conn: %s", err.Error())
+	}
+
+	bufSize := DefaultBufferSize
+	if cl.IOBufferSize > 0 {
+		bufSize = cl.IOBufferSize
+	}
+	rc := NewConnSize(c, bufSize)
+	if cl.OnNew == nil {
+		return rc, nil
+	}
+	err = cl.OnNew(rc)
+	if err != nil {
+		return nil, fmt.Errorf("red: OnNew: %s", err.Error())
+	}
+	return rc, nil
 }
 
-func (p *Pool) popIdle() Conn {
+func (cl *Client) popIdle() *Conn {
 	// TODO (ryanfowler): optimize?
-	c := p.idleConns[0]
-	copy(p.idleConns, p.idleConns[1:])
-	p.idleConns[len(p.idleConns)-1] = nil
-	p.idleConns = p.idleConns[:len(p.idleConns)-1]
+	c := cl.idleConns[0]
+	copy(cl.idleConns, cl.idleConns[1:])
+	cl.idleConns[len(cl.idleConns)-1] = idleConn{}
+	cl.idleConns = cl.idleConns[:len(cl.idleConns)-1]
 	return c.conn
 }
 
-func (p *Pool) waitOK() bool {
-	if p.MaxWaiting < 0 {
-		return false
-	}
-	if p.MaxWaiting > 0 && p.numWaiting >= p.MaxWaiting {
-		return false
-	}
-	return true
+func (cl *Client) waitOK() bool {
+	return cl.MaxWaiting == 0 || cl.numWaiting < cl.MaxWaiting
 }
 
-func (p *Pool) putConn(c Conn) {
+func (cl *Client) putConn(c *Conn) {
 	if c == nil {
 		return
 	}
 
-	p.mu.Lock()
+	cl.mu.Lock()
 
 	// Return if the pool is closed or the connection has a fatal error.
-	if p.closed || c.Err() != nil {
-		p.decrActiveLocked(1)
-		p.mu.Unlock()
+	if cl.closed || c.Err() != nil {
+		cl.decrActiveLocked(1)
+		cl.mu.Unlock()
 		c.Close()
 		return
 	}
 
 	// Check number of idle conns.
-	maxIdle := p.MaxIdleConns
+	maxIdle := cl.MaxIdleConns
 	if maxIdle < 1 {
 		maxIdle = 10
 	}
-	if len(p.idleConns) >= maxIdle {
-		p.decrActiveLocked(1)
-		p.mu.Unlock()
+	if len(cl.idleConns) >= maxIdle {
+		cl.decrActiveLocked(1)
+		cl.mu.Unlock()
 		c.Close()
 		return
 	}
 
 	// Add to idle conns and optionally start the idle conn worker.
-	p.idleConns = append(p.idleConns, &idleConn{conn: c, idleSince: time.Now()})
-	p.startMaxIdleWorker()
-	p.decrActiveLocked(0)
-	p.mu.Unlock()
+	cl.idleConns = append(cl.idleConns, idleConn{conn: c, idleSince: time.Now()})
+	cl.startMaxIdleWorker()
+	cl.decrActiveLocked(0)
+	cl.mu.Unlock()
 }
 
-func (p *Pool) decrActiveLocked(n int) {
-	p.numActive -= n
-	if p.cond != nil && p.numWaiting > 0 {
-		p.cond.Signal()
+func (cl *Client) decrActiveLocked(n int) {
+	cl.numActive -= n
+	if cl.cond != nil && cl.numWaiting > 0 {
+		cl.cond.Signal()
 	}
 }
 
-func (p *Pool) ExecArray(cmd string, args []interface{}, fn func(*Array) error) error {
-	return p.Conn(func(c Conn) error {
-		return p.execArray(c, cmd, args, fn)
-	})
-}
-
-func (p *Pool) execArray(c Conn, cmd string, args []interface{}, fn func(*Array) error) error {
-	c.Cmd(cmd, args...)
-	err := c.Send()
-	if err != nil {
-		return err
-	}
-	ar, err := c.ReadArray()
-	if err != nil {
-		return err
-	}
-	defer ar.Close()
-	return fn(ar)
-}
-
-func (p *Pool) ExecStringArray(cmd string, args ...interface{}) ([]string, error) {
+func (cl *Client) ExecStringArray(cmd string, args ...interface{}) ([]string, error) {
 	var ss []string
-	err := p.Conn(func(c Conn) error {
+	err := cl.Conn(func(c *Conn) error {
 		var err error
-		ss, err = p.execStringArray(c, cmd, args...)
+		ss, err = c.ExecStringArray(cmd, args...)
 		return err
 	})
 	return ss, err
 }
 
-func (p *Pool) execStringArray(c Conn, cmd string, args ...interface{}) ([]string, error) {
-	c.Cmd(cmd, args...)
-	err := c.Send()
-	if err != nil {
-		return nil, err
-	}
-	return c.ReadStringArray()
-}
-
-func (p *Pool) ExecNullStringArray(cmd string, args ...interface{}) ([]NullString, error) {
+func (cl *Client) ExecNullStringArray(cmd string, args ...interface{}) ([]NullString, error) {
 	var nss []NullString
-	err := p.Conn(func(c Conn) error {
+	err := cl.Conn(func(c *Conn) error {
 		var err error
-		nss, err = p.execNullStringArray(c, cmd, args...)
+		nss, err = c.ExecNullStringArray(cmd, args...)
 		return err
 	})
 	return nss, err
 }
 
-func (p *Pool) execNullStringArray(c Conn, cmd string, args ...interface{}) ([]NullString, error) {
-	c.Cmd(cmd, args...)
-	err := c.Send()
-	if err != nil {
-		return nil, err
-	}
-	return c.ReadNullStringArray()
-}
-
-func (p *Pool) ExecBytesArray(cmd string, args ...interface{}) ([][]byte, error) {
+func (cl *Client) ExecBytesArray(cmd string, args ...interface{}) ([][]byte, error) {
 	var bs [][]byte
-	err := p.Conn(func(c Conn) error {
+	err := cl.Conn(func(c *Conn) error {
 		var err error
-		bs, err = p.execBytesArray(c, cmd, args...)
+		bs, err = c.ExecBytesArray(cmd, args...)
 		return err
 	})
 	return bs, err
 }
 
-func (p *Pool) execBytesArray(c Conn, cmd string, args ...interface{}) ([][]byte, error) {
-	c.Cmd(cmd, args...)
-	err := c.Send()
-	if err != nil {
-		return nil, err
-	}
-	return c.ReadBytesArray()
-}
-
-func (p *Pool) ExecIntegerArray(cmd string, args ...interface{}) ([]int64, error) {
+func (cl *Client) ExecIntegerArray(cmd string, args ...interface{}) ([]int64, error) {
 	var is []int64
-	err := p.Conn(func(c Conn) error {
+	err := cl.Conn(func(c *Conn) error {
 		var err error
-		is, err = p.execIntegerArray(c, cmd, args...)
+		is, err = c.ExecIntegerArray(cmd, args...)
 		return err
 	})
 	return is, err
 }
 
-func (p *Pool) execIntegerArray(c Conn, cmd string, args ...interface{}) ([]int64, error) {
-	c.Cmd(cmd, args...)
-	err := c.Send()
-	if err != nil {
-		return nil, err
-	}
-	return c.ReadIntegerArray()
-}
-
-func (p *Pool) ExecString(cmd string, args ...interface{}) (string, error) {
+func (cl *Client) ExecString(cmd string, args ...interface{}) (string, error) {
 	var s string
-	err := p.Conn(func(c Conn) error {
+	err := cl.Conn(func(c *Conn) error {
 		var err error
-		s, err = p.execString(c, cmd, args...)
+		s, err = c.ExecString(cmd, args...)
 		return err
 	})
 	return s, err
 }
 
-func (p *Pool) execString(c Conn, cmd string, args ...interface{}) (string, error) {
-	c.Cmd(cmd, args...)
-	err := c.Send()
-	if err != nil {
-		return "", err
-	}
-	return c.ReadString()
-}
-
-func (p *Pool) ExecBytes(cmd string, args ...interface{}) ([]byte, error) {
+func (cl *Client) ExecBytes(cmd string, args ...interface{}) ([]byte, error) {
 	var b []byte
-	err := p.Conn(func(c Conn) error {
+	err := cl.Conn(func(c *Conn) error {
 		var err error
-		b, err = p.execBytes(c, cmd, args...)
+		b, err = c.ExecBytes(cmd, args...)
 		return err
 	})
 	return b, err
 }
 
-func (p *Pool) execBytes(c Conn, cmd string, args ...interface{}) ([]byte, error) {
-	c.Cmd(cmd, args...)
-	err := c.Send()
-	if err != nil {
-		return nil, err
-	}
-	return c.ReadBytes()
-}
-
-func (p *Pool) ExecNullString(cmd string, args ...interface{}) (NullString, error) {
+func (cl *Client) ExecNullString(cmd string, args ...interface{}) (NullString, error) {
 	var ns NullString
-	err := p.Conn(func(c Conn) error {
+	err := cl.Conn(func(c *Conn) error {
 		var err error
-		ns, err = p.execNullString(c, cmd, args...)
+		ns, err = c.ExecNullString(cmd, args...)
 		return err
 	})
 	return ns, err
 }
 
-func (p *Pool) execNullString(c Conn, cmd string, args ...interface{}) (NullString, error) {
-	c.Cmd(cmd, args...)
-	err := c.Send()
-	if err != nil {
-		return NullString{}, err
-	}
-	return c.ReadNullString()
-}
-
-func (p *Pool) ExecInteger(cmd string, args ...interface{}) (int64, error) {
+func (cl *Client) ExecInteger(cmd string, args ...interface{}) (int64, error) {
 	var i int64
-	err := p.Conn(func(c Conn) error {
+	err := cl.Conn(func(c *Conn) error {
 		var err error
-		i, err = p.execInteger(c, cmd, args...)
+		i, err = c.ExecInteger(cmd, args...)
 		return err
 	})
 	return i, err
 }
 
-func (p *Pool) execInteger(c Conn, cmd string, args ...interface{}) (int64, error) {
-	c.Cmd(cmd, args...)
-	err := c.Send()
-	if err != nil {
-		return 0, err
-	}
-	return c.ReadInteger()
-}
-
-func (p *Pool) startMaxIdleWorker() {
-	if p.IdleConnTimeout > 0 && p.chMaxIdleDur == nil && len(p.idleConns) > 0 {
-		p.chMaxIdleDur = make(chan struct{}, 1)
-		go p.maxIdleWorker()
+func (cl *Client) startMaxIdleWorker() {
+	if cl.IdleConnTimeout > 0 && cl.chMaxIdleDur == nil && len(cl.idleConns) > 0 {
+		cl.chMaxIdleDur = make(chan struct{}, 1)
+		go cl.maxIdleWorker()
 	}
 }
 
-func (p *Pool) maxIdleWorker() {
-	dur := maxDuration(p.IdleConnTimeout, time.Second)
+func (cl *Client) maxIdleWorker() {
+	dur := maxDuration(cl.IdleConnTimeout, time.Second)
 	t := time.NewTimer(dur)
 	for {
 		select {
 		case <-t.C:
-		case <-p.chMaxIdleDur:
+		case <-cl.chMaxIdleDur:
 		}
 
-		p.mu.Lock()
+		cl.mu.Lock()
 
-		if p.closed || len(p.idleConns) == 0 {
-			p.chMaxIdleDur = nil
-			p.mu.Unlock()
+		if cl.closed || len(cl.idleConns) == 0 {
+			cl.chMaxIdleDur = nil
+			cl.mu.Unlock()
 			t.Stop()
 			return
 		}
 
-		var toClose []Conn
+		var toClose []*Conn
 		expiry := time.Now().Add(-dur)
-		for len(p.idleConns) > 0 {
-			c := p.idleConns[0]
+		for len(cl.idleConns) > 0 {
+			c := cl.idleConns[0]
 			if c.idleSince.After(expiry) {
 				break
 			}
 			toClose = append(toClose, c.conn)
-			copy(p.idleConns, p.idleConns[1:])
-			p.idleConns[len(p.idleConns)-1] = nil
-			p.idleConns = p.idleConns[:len(p.idleConns)-1]
+			copy(cl.idleConns, cl.idleConns[1:])
+			cl.idleConns[len(cl.idleConns)-1] = idleConn{}
+			cl.idleConns = cl.idleConns[:len(cl.idleConns)-1]
 
 		}
-		p.numActive -= len(toClose)
-		if p.cond != nil {
-			for i := 0; i < len(toClose) && i < p.numWaiting; i++ {
-				p.cond.Signal()
+		cl.numActive -= len(toClose)
+		if cl.cond != nil {
+			for i := 0; i < len(toClose) && i < cl.numWaiting; i++ {
+				cl.cond.Signal()
 			}
 		}
-		p.mu.Unlock()
+		cl.mu.Unlock()
 
 		for _, c := range toClose {
 			c.Close()

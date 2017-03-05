@@ -35,19 +35,19 @@ import (
 )
 
 const (
+	DefaultBufferSize  = 1 << 13
 	defaultDialTimeout = 30 * time.Second
-	defaultBufferSize  = 1 << 13
 )
 
 // Dial returns a new Conn using the the TCP protocol and the provided address
 // and connection timeout.
-func Dial(addr string, timeout time.Duration) (Conn, error) {
+func Dial(addr string, timeout time.Duration) (*Conn, error) {
 	return DialNetwork("tcp", addr, timeout)
 }
 
 // DialNetwork returns a new Conn using the provided network, address, and
 // connection timeout.
-func DialNetwork(network, addr string, timeout time.Duration) (Conn, error) {
+func DialNetwork(network, addr string, timeout time.Duration) (*Conn, error) {
 	dialer := net.Dialer{Timeout: timeout}
 	tcpConn, err := dialer.Dial(network, addr)
 	if err != nil {
@@ -56,12 +56,11 @@ func DialNetwork(network, addr string, timeout time.Duration) (Conn, error) {
 	return NewConn(tcpConn), nil
 }
 
-func DialNetworkSize(network, addr string, timeout time.Duration, bufferSize int) (Conn, error) {
-	return nil, nil
-}
-
-// conn represents the actual implementation of the Conn interface.
-type conn struct {
+// Conn represents a single connection to a Redis server.
+//
+// Only one method on a Conn should be called at a time, with the only exception
+// being the Err method.
+type Conn struct {
 	c net.Conn
 	r *resp.Reader
 	w *resp.Writer
@@ -73,14 +72,18 @@ type conn struct {
 }
 
 // NewConn returns an initialized Conn using the provided net.Conn.
-func NewConn(c net.Conn) Conn {
-	return NewConnSize(c, defaultBufferSize)
+func NewConn(c net.Conn) *Conn {
+	return NewConnSize(c, DefaultBufferSize)
 }
 
 // NewConnSize returns an initialized Conn using the provided net.Conn and
 // read/write buffer size.
-func NewConnSize(c net.Conn, bufferSize int) Conn {
-	return &conn{
+func NewConnSize(c net.Conn, bufferSize int) *Conn {
+	const minBufSize = 1 << 10
+	if bufferSize < minBufSize {
+		bufferSize = minBufSize
+	}
+	return &Conn{
 		c: c,
 		r: resp.NewReaderSize(c, bufferSize),
 		w: resp.NewWriterSize(c, bufferSize),
@@ -88,13 +91,13 @@ func NewConnSize(c net.Conn, bufferSize int) Conn {
 }
 
 // NetConn returns the Conn's underlying net.Conn.
-func (c *conn) NetConn() net.Conn {
+func (c *Conn) NetConn() net.Conn {
 	return c.c
 }
 
 // Close closes the underlying net.Conn. A Conn cannot be used after being
 // closed.
-func (c *conn) Close() error {
+func (c *Conn) Close() error {
 	c.mu.Lock()
 	if c.err != nil {
 		c.err = errors.New("red: connection closed")
@@ -103,42 +106,52 @@ func (c *conn) Close() error {
 	return c.c.Close()
 }
 
-// Err returns any fatal error that the Conn has experienced.
-func (c *conn) Err() error {
+// Err returns any fatal error that the Conn has experienced. If the returned
+// error is non-nil, the connection should NOT be reused.
+func (c *Conn) Err() error {
 	c.mu.Lock()
 	err := c.err
 	c.mu.Unlock()
 	return err
 }
 
-// Cmd issues the provided Redis command and arguments. Send must be called
-// before reading any data off of the Conn to flush any buffered data to the
-// Redis server.
-func (c *conn) Cmd(cmd string, args ...interface{}) error {
-	err := c.cmd(cmd, args...)
-	if err != nil {
-		c.connError(err)
-	}
-	return err
+// Pipeline returns a new Pipeline using the given Redis connection.
+func (c *Conn) Pipeline() *Pipeline {
+	return &Pipeline{c: c}
 }
 
-func (c *conn) cmd(cmd string, args ...interface{}) error {
+// PubSub returns a new PubSub using the given Redis connection.
+func (c *Conn) PubSub() *PubSub {
+	return &PubSub{c: c}
+}
+
+func (c *Conn) cmdSend(cmd string, args ...interface{}) error {
+	err := c.cmd(cmd, args...)
+	if err != nil {
+		return err
+	}
+	return c.exec()
+}
+
+func (c *Conn) cmd(cmd string, args ...interface{}) error {
 	c.w.WriteArrayLength(len(args) + 1)
 	err := c.w.WriteBulkString(cmd)
 	if err != nil {
+		c.connError(err)
 		return err
 	}
 	for _, arg := range args {
 		err = c.writeArg(arg)
 		if err != nil {
+			c.connError(err)
 			return err
 		}
 	}
 	return nil
 }
 
-// Send flushes any buffered data to the Redis server.
-func (c *conn) Send() error {
+// exec flushes any buffered data to the Redis server.
+func (c *Conn) exec() error {
 	err := c.w.Flush()
 	if err != nil {
 		c.connError(err)
@@ -146,8 +159,8 @@ func (c *conn) Send() error {
 	return err
 }
 
-// NextType returns the RESP DataType of the next value to be read.
-func (c *conn) NextType() (resp.DataType, error) {
+// nextType returns the RESP DataType of the next value to be read.
+func (c *Conn) nextType() (resp.DataType, error) {
 	t, err := c.r.NextType()
 	if err != nil {
 		c.connError(err)
@@ -155,81 +168,124 @@ func (c *conn) NextType() (resp.DataType, error) {
 	return t, err
 }
 
-// ReadDiscard reads (and discards) the next value and returns any error
-// encountered.
-func (c *conn) ReadDiscard() error {
-	err := c.r.Discard()
+// ExecDiscard executes the provided command and discards the next value,
+// returning any error encountered.
+func (c *Conn) ExecDiscard(cmd string, args ...interface{}) error {
+	err := c.cmdSend(cmd, args...)
 	if err != nil {
-		c.connError(err)
+		return err
 	}
-	return err
+	return c.readDiscard()
 }
 
-// ReadString reads the next value and returns it as a string.
+func (c *Conn) readDiscard() error {
+	t, err := c.nextType()
+	if err != nil {
+		return err
+	}
+	if t != resp.ErrorType {
+		err = c.r.Discard()
+		if err != nil {
+			c.connError(err)
+		}
+		return err
+	}
+	msg, err := c.r.ReadError()
+	if err != nil {
+		c.connError(err)
+		return err
+	}
+	return &RedisError{msg: msg}
+}
+
+// ExecString executes the provided command and returns the response as a string.
 //
 // - Bulk string: returned "as-is". If the value is null, an empty string is
 // returned.
 // - Simple string: returned "as-is".
 // - Integer: returned as the string representation of the integer.
 // - Array, Error: an error is returned.
-func (c *conn) ReadString() (string, error) {
-	s, _, err := c.readString()
+func (c *Conn) ExecString(cmd string, args ...interface{}) (string, error) {
+	err := c.cmdSend(cmd, args...)
 	if err != nil {
-		c.connError(err)
+		return "", err
 	}
+	s, _, err := c.readString()
 	return s, err
 }
 
-// ReadNullString reads the next value and returns it as a NullString.
+// ExecNullString executes the provided command and returns the response as a
+// NullString.
 //
 // - Bulk string: returned "as-is". If the value is null, the NullString.Valid
 // is set to false.
 // - Simple string: returned "as-is".
 // - Integer: returned as the string representation of the integer.
 // - Array, Error: an error is returned.
-func (c *conn) ReadNullString() (NullString, error) {
-	s, ok, err := c.readString()
+func (c *Conn) ExecNullString(cmd string, args ...interface{}) (NullString, error) {
+	err := c.cmdSend(cmd, args...)
 	if err != nil {
-		c.connError(err)
+		return NullString{}, err
 	}
+	s, ok, err := c.readString()
 	return NullString{
 		String: s,
 		Valid:  ok,
 	}, err
 }
 
-// ReadInteger reads the next value and returns it as an integer.
+// ExecInteger executes the provided command and returns the response as an
+// integer.
 //
 // - Integer: returned as the string representation of the integer.
 // - Bulk string, Simple string: attempt to parse as an integer.
 // - Array, Error: an error is returned.
-func (c *conn) ReadInteger() (int64, error) {
-	i, err := c.readInteger()
+func (c *Conn) ExecInteger(cmd string, args ...interface{}) (int64, error) {
+	err := c.cmdSend(cmd, args...)
 	if err != nil {
-		c.connError(err)
+		return 0, err
 	}
-	return i, err
+	return c.readInteger()
 }
 
-// ReadBytes reads the next value and returns it as a byte slice.
+// ExecBytes executes the provided command and returns the response as a byte
+// slice.
 //
 // - Bulk string: returned "as-is". If the value is null, nil is returned.
 // - Simple string: returned "as-is".
 // - Integer: returned as the byte slice representation of the integer.
 // - Array, Error: an error is returned.
-func (c *conn) ReadBytes() ([]byte, error) {
-	b, err := c.readBytes()
+func (c *Conn) ExecBytes(cmd string, args ...interface{}) ([]byte, error) {
+	err := c.cmdSend(cmd, args...)
 	if err != nil {
-		c.connError(err)
+		return nil, err
 	}
-	return b, err
+	return c.readBytes()
 }
 
-// ReadArray reads the next value and returns an ArrayRes.
+// ExecArray executes the provided command and returns the response as an
+// Array.
 //
 // - Array: returns an ArrayRes.
 // - Bulk string, Simple string, Integer, Error: an error is returned.
-func (c *conn) ReadArray() (*Array, error) {
+func (c *Conn) ExecArray(cmd string, args ...interface{}) (*Array, error) {
+	err := c.cmdSend(cmd, args...)
+	if err != nil {
+		return nil, err
+	}
+	return c.readArray()
+}
+
+func (c *Conn) readArray() (*Array, error) {
+	t, err := c.nextType()
+	if err != nil {
+		return nil, err
+	}
+	switch t {
+	case resp.ArrayType:
+	default:
+		return nil, c.readDiscard()
+	}
 	length, err := c.r.ReadArrayLength()
 	if err != nil {
 		c.connError(err)
@@ -241,12 +297,13 @@ func (c *conn) ReadArray() (*Array, error) {
 	}, nil
 }
 
-// ReadStringArray reads the next value as a slice of strings.
+// ExecStringArray executes the provided command and returns the response as a
+// slice of strings.
 //
 // - Array: returns the array values as strings.
 // - Bulk string, Simple string, Integer, Error: an error is returned.
-func (c *conn) ReadStringArray() ([]string, error) {
-	ar, err := c.ReadArray()
+func (c *Conn) ExecStringArray(cmd string, args ...interface{}) ([]string, error) {
+	ar, err := c.ExecArray(cmd, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -265,12 +322,13 @@ func (c *conn) ReadStringArray() ([]string, error) {
 	return ss, nil
 }
 
-// ReadNullStringArray reads the next value as a slice of NullStrings.
+// ExecNullStringArray executes the provided command and returns the response as
+// a slice of NullStrings.
 //
 // - Array: returns the array values as NullStrings.
 // - Bulk string, Simple string, Integer, Error: an error is returned.
-func (c *conn) ReadNullStringArray() ([]NullString, error) {
-	ar, err := c.ReadArray()
+func (c *Conn) ExecNullStringArray(cmd string, args ...interface{}) ([]NullString, error) {
+	ar, err := c.ExecArray(cmd, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -289,12 +347,13 @@ func (c *conn) ReadNullStringArray() ([]NullString, error) {
 	return ss, nil
 }
 
-// ReadBytesArray reads the next value as a slice of byte slices.
+// ExecBytesArray executes the provided command and returns the reponse as a
+// slice of byte slices.
 //
 // - Array: returns the array values as byte slices.
 // - Bulk string, Simple string, Integer, Error: an error is returned.
-func (c *conn) ReadBytesArray() ([][]byte, error) {
-	ar, err := c.ReadArray()
+func (c *Conn) ExecBytesArray(cmd string, args ...interface{}) ([][]byte, error) {
+	ar, err := c.ExecArray(cmd, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -313,12 +372,13 @@ func (c *conn) ReadBytesArray() ([][]byte, error) {
 	return bs, nil
 }
 
-// ReadIntegerArray reads the next value as a slice of integers.
+// ExecIntegerArray executes the provided command and returns the response as a
+// slice of integers.
 //
 // - Array: returns the array values as integers.
 // - Bulk string, Simple string, Integer, Error: an error is returned.
-func (c *conn) ReadIntegerArray() ([]int64, error) {
-	ar, err := c.ReadArray()
+func (c *Conn) ExecIntegerArray(cmd string, args ...interface{}) ([]int64, error) {
+	ar, err := c.ExecArray(cmd, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -337,7 +397,16 @@ func (c *conn) ReadIntegerArray() ([]int64, error) {
 	return is, nil
 }
 
-func (c *conn) readString() (string, bool, error) {
+func (c *Conn) readString() (string, bool, error) {
+	s, ok, err := c.readStringInner()
+	if err != nil {
+		c.connError(err)
+		return "", false, err
+	}
+	return s, ok, nil
+}
+
+func (c *Conn) readStringInner() (string, bool, error) {
 	t, err := c.r.NextType()
 	if err != nil {
 		return "", false, err
@@ -356,15 +425,24 @@ func (c *conn) readString() (string, bool, error) {
 		if err != nil {
 			return "", false, err
 		}
-		return "", false, fmt.Errorf("red: %s", msg)
+		return "", false, &RedisError{msg: msg}
 	case resp.ArrayType:
-		return "", false, parsingError("string", "array")
+		return "", false, c.discardNext("string", "array")
 	default:
-		return "", false, invalidTypeError(t)
+		return "", false, c.invalidTypeError(t)
 	}
 }
 
-func (c *conn) readInteger() (int64, error) {
+func (c *Conn) readInteger() (int64, error) {
+	i, err := c.readIntegerInner()
+	if err != nil {
+		c.connError(err)
+		return 0, err
+	}
+	return i, nil
+}
+
+func (c *Conn) readIntegerInner() (int64, error) {
 	t, err := c.r.NextType()
 	if err != nil {
 		return 0, err
@@ -382,24 +460,32 @@ func (c *conn) readInteger() (int64, error) {
 		if err != nil {
 			return 0, err
 		}
-		return 0, fmt.Errorf("red: %s", msg)
+		return 0, &RedisError{msg: msg}
 	case resp.ArrayType:
-		return 0, parsingError("integer", "array")
+		return 0, c.discardNext("integer", "array")
 	default:
-		return 0, invalidTypeError(t)
+		return 0, c.invalidTypeError(t)
 	}
 	if err != nil {
 		return 0, err
 	}
 	i, err := strconv.ParseInt(s, 10, 64)
 	if err != nil {
-		// TODO: this is a non-fatal error.
 		return 0, fmt.Errorf("red: unable to parse integer: '%s'", s)
 	}
 	return i, nil
 }
 
-func (c *conn) readBytes() ([]byte, error) {
+func (c *Conn) readBytes() ([]byte, error) {
+	b, err := c.readBytesInner()
+	if err != nil {
+		c.connError(err)
+		return nil, err
+	}
+	return b, nil
+}
+
+func (c *Conn) readBytesInner() ([]byte, error) {
 	t, err := c.r.NextType()
 	if err != nil {
 		return nil, err
@@ -416,30 +502,35 @@ func (c *conn) readBytes() ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		return nil, fmt.Errorf("red: %s", msg)
+		return nil, &RedisError{msg: msg}
 	case resp.ArrayType:
-		return nil, parsingError("bytes", "array")
+		return nil, c.discardNext("bytes", "array")
 	default:
-		return nil, invalidTypeError(t)
+		return nil, c.invalidTypeError(t)
 	}
 }
 
-func parsingError(exp, got string) error {
+func (c *Conn) invalidTypeError(t resp.DataType) error {
+	err := fmt.Errorf("red: invalid data type byte: '%s'", string(t))
+	c.forceConnError(err)
+	return err
+}
+
+func (c *Conn) discardNext(exp, got string) error {
+	err := c.readDiscard()
+	if err != nil {
+		return err
+	}
 	return fmt.Errorf("red: unable to parse type '%s' as '%s'", got, exp)
 }
 
-func invalidTypeError(t resp.DataType) error {
-	return fmt.Errorf("red: invalid data type byte: '%s'", string(t))
-}
-
-func (c *conn) connError(err error) {
-	if _, ok := err.(*resp.Error); !ok {
-		return
+func (c *Conn) connError(err error) {
+	if _, ok := err.(*resp.Error); ok {
+		c.forceConnError(err)
 	}
-	c.forceConnError(err)
 }
 
-func (c *conn) forceConnError(err error) {
+func (c *Conn) forceConnError(err error) {
 	c.mu.Lock()
 	if c.err == nil {
 		c.err = err
@@ -447,7 +538,7 @@ func (c *conn) forceConnError(err error) {
 	c.mu.Unlock()
 }
 
-func (c *conn) writeArg(arg interface{}) error {
+func (c *Conn) writeArg(arg interface{}) error {
 	switch v := arg.(type) {
 	case string:
 		return c.w.WriteBulkString(v)
@@ -491,17 +582,17 @@ func (c *conn) writeArg(arg interface{}) error {
 	}
 }
 
-func (c *conn) writeInt(i int64) error {
+func (c *Conn) writeInt(i int64) error {
 	b := strconv.AppendInt(c.scratch[:0], i, 10)
 	return c.w.WriteBulkStringBytes(b)
 }
 
-func (c *conn) writeUint(i uint64) error {
+func (c *Conn) writeUint(i uint64) error {
 	b := strconv.AppendUint(c.scratch[:0], i, 10)
 	return c.w.WriteBulkStringBytes(b)
 }
 
-func (c *conn) writeFloat(f float64) error {
+func (c *Conn) writeFloat(f float64) error {
 	b := strconv.AppendFloat(c.scratch[:0], f, 'f', -1, 64)
 	return c.w.WriteBulkStringBytes(b)
 }
