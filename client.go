@@ -31,10 +31,13 @@ import (
 )
 
 var (
-	// ErrTooManyActive represents the error on a Pool when the
+	// ErrTooManyActive represents the error on a Client when the
 	// MaxActiveConns and MaxWaiting limits have been reached.
 	ErrTooManyActive = errors.New("red: too many active connections")
-	errPoolClosed    = errors.New("red: pool closed")
+
+	// ErrClientClosed represents the error returned from a method when the
+	// Client has been closed.
+	ErrClientClosed = errors.New("red: client closed")
 )
 
 // Client represents a pool of zero or more Redis Connections.
@@ -76,7 +79,8 @@ type Client struct {
 
 	// NetTimeout sets a timeout on a Conn for when all IO operations will
 	// return an error. It calls the SetDeadline method on the underlying
-	// net.Conn before presenting the Conn for use.
+	// net.Conn before presenting the Conn for use. By default, no timeout
+	// is applied.
 	NetTimeout time.Duration
 
 	// OnNew represents an optional function that will be called before
@@ -103,7 +107,7 @@ type idleConn struct {
 	idleSince time.Time
 }
 
-// Status represents the status of a Pool.
+// Status represents some snapshot information about a Client.
 type Status struct {
 	// Closed is true if the Pool has been closed.
 	Closed bool
@@ -116,7 +120,7 @@ type Status struct {
 	NumWaiting int
 }
 
-// Status returns the current status of the Pool.
+// Status returns the current status of the Client.
 func (cl *Client) Status() Status {
 	cl.mu.Lock()
 	s := Status{
@@ -184,7 +188,7 @@ func (cl *Client) getConn() (*Conn, error) {
 		// Return if pool is closed.
 		if cl.closed {
 			cl.mu.Unlock()
-			return nil, errPoolClosed
+			return nil, ErrClientClosed
 		}
 
 		// Attempt to get an idle conn.
@@ -204,9 +208,6 @@ func (cl *Client) getConn() (*Conn, error) {
 		if cl.MaxActiveConns <= 0 || cl.numActive < cl.MaxActiveConns {
 			break
 		}
-		if cl.cond == nil {
-			cl.cond = sync.NewCond(&cl.mu)
-		}
 
 		// Check wait limits.
 		if !cl.waitOK() {
@@ -214,6 +215,10 @@ func (cl *Client) getConn() (*Conn, error) {
 			return nil, ErrTooManyActive
 		}
 
+		// Wait until a connection becomes active.
+		if cl.cond == nil {
+			cl.cond = sync.NewCond(&cl.mu)
+		}
 		cl.numWaiting++
 		cl.cond.Wait()
 		cl.numWaiting--
@@ -234,7 +239,7 @@ func (cl *Client) getConn() (*Conn, error) {
 
 func (cl *Client) setTimeout(c *Conn) {
 	if cl.NetTimeout > 0 {
-		c.NetConn().SetDeadline(time.Now().Add(cl.NetTimeout))
+		c.c.SetDeadline(time.Now().Add(cl.NetTimeout))
 	}
 }
 
@@ -323,6 +328,16 @@ func (cl *Client) decrActiveLocked(n int) {
 	}
 }
 
+// ExecDiscard executes the provided command, discarding the returned data. Any
+// error encountered will be returned.
+func (cl *Client) ExecDiscard(cmd string, args ...interface{}) error {
+	return cl.Conn(func(c *Conn) error {
+		return c.ExecDiscard(cmd, args...)
+	})
+}
+
+// ExecStringArray executes the provided command, returning the result as a
+// slice of strings.
 func (cl *Client) ExecStringArray(cmd string, args ...interface{}) ([]string, error) {
 	var ss []string
 	err := cl.Conn(func(c *Conn) error {
@@ -333,6 +348,8 @@ func (cl *Client) ExecStringArray(cmd string, args ...interface{}) ([]string, er
 	return ss, err
 }
 
+// ExecNullStringArray executes the provided command, returning the result as a
+// slice of NullStrings.
 func (cl *Client) ExecNullStringArray(cmd string, args ...interface{}) ([]NullString, error) {
 	var nss []NullString
 	err := cl.Conn(func(c *Conn) error {
@@ -343,6 +360,8 @@ func (cl *Client) ExecNullStringArray(cmd string, args ...interface{}) ([]NullSt
 	return nss, err
 }
 
+// ExecBytesArray executes the provided command, returning the result as a slice
+// of byte slices.
 func (cl *Client) ExecBytesArray(cmd string, args ...interface{}) ([][]byte, error) {
 	var bs [][]byte
 	err := cl.Conn(func(c *Conn) error {
@@ -353,6 +372,8 @@ func (cl *Client) ExecBytesArray(cmd string, args ...interface{}) ([][]byte, err
 	return bs, err
 }
 
+// ExecIntegerArray executes the provided command, returning the result as a
+// slice of integers.
 func (cl *Client) ExecIntegerArray(cmd string, args ...interface{}) ([]int64, error) {
 	var is []int64
 	err := cl.Conn(func(c *Conn) error {
@@ -363,6 +384,7 @@ func (cl *Client) ExecIntegerArray(cmd string, args ...interface{}) ([]int64, er
 	return is, err
 }
 
+// ExecString executes the provided command, returning the result as a string.
 func (cl *Client) ExecString(cmd string, args ...interface{}) (string, error) {
 	var s string
 	err := cl.Conn(func(c *Conn) error {
@@ -373,6 +395,8 @@ func (cl *Client) ExecString(cmd string, args ...interface{}) (string, error) {
 	return s, err
 }
 
+// ExecBytes executes the provided command, returning the result as a byte
+// slice.
 func (cl *Client) ExecBytes(cmd string, args ...interface{}) ([]byte, error) {
 	var b []byte
 	err := cl.Conn(func(c *Conn) error {
@@ -383,6 +407,8 @@ func (cl *Client) ExecBytes(cmd string, args ...interface{}) ([]byte, error) {
 	return b, err
 }
 
+// ExecNullString executes the provided command, returning the result as a
+// NullString.
 func (cl *Client) ExecNullString(cmd string, args ...interface{}) (NullString, error) {
 	var ns NullString
 	err := cl.Conn(func(c *Conn) error {
@@ -393,6 +419,8 @@ func (cl *Client) ExecNullString(cmd string, args ...interface{}) (NullString, e
 	return ns, err
 }
 
+// ExecInteger executes the provided command, returning the result as an
+// integer.
 func (cl *Client) ExecInteger(cmd string, args ...interface{}) (int64, error) {
 	var i int64
 	err := cl.Conn(func(c *Conn) error {

@@ -36,3 +36,7 @@ type RedisError struct {
 func (e *RedisError) Error() string {
 	return "red: " + e.msg
 }
+
+func (e *RedisError) Message() string {
+	return e.msg
+}
